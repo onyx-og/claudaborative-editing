@@ -87,11 +87,19 @@ describe('post tools', () => {
 			assertDefined(tool);
 			const result = await tool.handler({ postId: 42 });
 
-			expect(session.openPost).toHaveBeenCalledWith(42);
+			expect(session.openPost).toHaveBeenCalledWith(42, undefined);
 			expect(result.content[0].text).toContain(
 				'Opened post 42 for editing'
 			);
 			expect(result.content[0].text).toContain('Title:');
+		});
+
+		it('passes postType through to the session', async () => {
+			const tool = server.registeredTools.get('wp_open_post');
+			assertDefined(tool);
+			await tool.handler({ postId: 10, postType: 'page' });
+
+			expect(session.openPost).toHaveBeenCalledWith(10, 'page');
 		});
 
 		it('returns error on failure', async () => {
@@ -153,10 +161,13 @@ describe('post tools', () => {
 			assertDefined(tool);
 			const result = await tool.handler({ title: 'New Post' });
 
-			expect(session.createPost).toHaveBeenCalledWith({
-				title: 'New Post',
-				content: undefined,
-			});
+			expect(session.createPost).toHaveBeenCalledWith(
+				{
+					title: 'New Post',
+					content: undefined,
+				},
+				undefined
+			);
 			expect(result.content[0].text).toContain(
 				'Created and opened post 42'
 			);

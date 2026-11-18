@@ -30,6 +30,8 @@ export interface ConversationResultData {
 export interface Command {
 	id: number;
 	post_id: number;
+	/** Post type of `post_id`. Null when the post no longer exists. */
+	post_type?: string | null;
 	user_id: number;
 	prompt: CommandSlug;
 	status: CommandStatus;

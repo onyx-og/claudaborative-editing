@@ -5,13 +5,27 @@ interface ListPostsInput {
 	status?: string;
 	search?: string;
 	perPage?: number;
+	postType?: string;
 }
+
+/**
+ * Shared `postType` input. Optional everywhere so existing callers keep
+ * working: listing and creating default to `post`, opening and viewing
+ * detect the type from the ID.
+ */
+export const postTypeSchema = (purpose: string) =>
+	z
+		.string()
+		.optional()
+		.describe(
+			`Post type slug, e.g. post, page, or a custom post type such as product. ${purpose}`
+		);
 
 export const postTools: ToolDefinition[] = [
 	{
 		name: 'wp_list_posts',
 		description:
-			'List WordPress posts with optional filters. By default, this shows published posts; specify a status filter if you want to see drafts or other non-published posts.',
+			'List WordPress posts, pages, or other block-editor post types with optional filters. By default, this shows published posts; specify a status filter if you want to see drafts or other non-published posts, and postType to list pages or a custom post type.',
 		inputSchema: {
 			status: z
 				.string()
@@ -24,17 +38,19 @@ export const postTools: ToolDefinition[] = [
 				.number()
 				.optional()
 				.describe('Number of posts to return (default 10)'),
+			postType: postTypeSchema('Defaults to post.'),
 		},
 		availableIn: ['connected', 'editing'],
 		tags: ['posts'],
 		execute: async (
 			session,
-			{ status, search, perPage }: ListPostsInput
+			{ status, search, perPage, postType }: ListPostsInput
 		) => {
 			const posts = await session.listPosts({
 				status,
 				search,
 				perPage,
+				postType,
 			});
 			if (posts.length === 0) {
 				return 'No posts found.';
@@ -50,14 +66,21 @@ export const postTools: ToolDefinition[] = [
 	},
 	{
 		name: 'wp_open_post',
-		description: 'Open a WordPress post for collaborative editing',
+		description:
+			'Open a WordPress post, page, or other block-editor post type for collaborative editing',
 		inputSchema: {
 			postId: z.number().describe('The post ID to open'),
+			postType: postTypeSchema(
+				'Optional: when omitted, the type is detected from the ID.'
+			),
 		},
 		availableIn: ['connected'],
 		tags: ['posts'],
-		execute: async (session, { postId }: { postId: number }) => {
-			await session.openPost(postId);
+		execute: async (
+			session,
+			{ postId, postType }: { postId: number; postType?: string }
+		) => {
+			await session.openPost(postId, postType);
 			const content = session.readPost();
 			return `Opened post ${postId} for editing.\n\n${content}`;
 		},
@@ -75,21 +98,27 @@ export const postTools: ToolDefinition[] = [
 	},
 	{
 		name: 'wp_create_post',
-		description: 'Create a new WordPress post and open it for editing',
+		description:
+			'Create a new WordPress post (or page, or other block-editor post type) and open it for editing',
 		inputSchema: {
 			title: z.string().optional().describe('Post title'),
 			content: z
 				.string()
 				.optional()
 				.describe('Initial post content (Gutenberg HTML)'),
+			postType: postTypeSchema('Defaults to post.'),
 		},
 		availableIn: ['connected'],
 		tags: ['posts'],
 		execute: async (
 			session,
-			{ title, content }: { title?: string; content?: string }
+			{
+				title,
+				content,
+				postType,
+			}: { title?: string; content?: string; postType?: string }
 		) => {
-			const post = await session.createPost({ title, content });
+			const post = await session.createPost({ title, content }, postType);
 			const rendered = session.readPost();
 			return `Created and opened post ${post.id}.\n\n${rendered}`;
 		},

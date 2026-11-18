@@ -1,9 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SessionManager } from '../../src/session/session-manager.js';
+import {
+	SessionManager,
+	pickEditablePostTypes,
+} from '../../src/session/session-manager.js';
 import type {
 	WordPressConfig,
 	WPNote,
 	WPPost,
+	WPPostType,
 	WPTerm,
 	WPUser,
 	SyncUpdate,
@@ -16,7 +20,8 @@ import { assertDefined } from '../test-utils.js';
 // --- Mock the WordPress API client ---
 const mockValidateConnection = vi.fn<() => Promise<WPUser>>();
 const mockValidateSyncEndpoint = vi.fn<() => Promise<void>>();
-const mockGetPost = vi.fn<(id: number) => Promise<WPPost>>();
+const mockGetPost = vi.fn<(id: number, postType?: string) => Promise<WPPost>>();
+const mockGetPostTypes = vi.fn<() => Promise<WPPostType[]>>();
 const mockListPosts = vi.fn<() => Promise<WPPost[]>>();
 const mockCreatePost = vi.fn<() => Promise<WPPost>>();
 const mockSendSyncUpdate = vi.fn();
@@ -63,6 +68,7 @@ vi.mock('../../src/wordpress/api-client.js', () => {
 				this.validateConnection = mockValidateConnection;
 				this.validateSyncEndpoint = mockValidateSyncEndpoint;
 				this.getPost = mockGetPost;
+				this.getPostTypes = mockGetPostTypes;
 				this.listPosts = mockListPosts;
 				this.createPost = mockCreatePost;
 				this.updatePost = mockUpdatePost;
@@ -231,6 +237,7 @@ describe('SessionManager', () => {
 			queueSize: 0,
 		});
 		mockGetBlockTypes.mockRejectedValue(new Error('Not available'));
+		mockGetPostTypes.mockRejectedValue(new Error('Not available'));
 		mockCheckNotesSupport.mockResolvedValue(false);
 		mockGetTerms.mockResolvedValue([]);
 		mockCommandHandlerStart.mockResolvedValue(false);
@@ -524,7 +531,7 @@ describe('SessionManager', () => {
 
 			expect(session.getState()).toBe('editing');
 			expect(session.getCurrentPost()).toEqual(fakePost);
-			expect(mockGetPost).toHaveBeenCalledWith(42);
+			expect(mockGetPost).toHaveBeenCalledWith(42, 'post');
 
 			// SyncClient.start() is called during connect() with the command room.
 			// openPost() adds the post room via addRoom().
@@ -572,6 +579,172 @@ describe('SessionManager', () => {
 			expect(initialUpdates).toHaveLength(1);
 			expect(initialUpdates[0].type).toBe('sync_step1');
 			expect(initialUpdates[0].data).toBeTruthy();
+		});
+	});
+
+	describe('post types', () => {
+		const fakePage: WPPost = {
+			...fakePost,
+			id: 10,
+			type: 'page',
+			title: { rendered: 'Home', raw: 'Home' },
+		};
+		const notFound = () =>
+			new WordPressApiError('Invalid post ID.', 404, '{}');
+		const type = (
+			slug: string,
+			extra: Partial<WPPostType> = {}
+		): WPPostType => ({
+			slug,
+			name: slug,
+			rest_base: `${slug}s`,
+			viewable: true,
+			supports: { editor: true },
+			...extra,
+		});
+
+		it('picks viewable editor types, posts and pages first', () => {
+			expect(
+				pickEditablePostTypes([
+					type('attachment'),
+					type('product'),
+					type('page'),
+					type('wp_block', { viewable: false }),
+					type('post'),
+					type('no_editor', { supports: { title: true } }),
+				])
+			).toEqual(['post', 'page', 'product']);
+		});
+
+		it('falls back to post and page when no type qualifies', () => {
+			expect(pickEditablePostTypes([])).toEqual(['post', 'page']);
+		});
+
+		it('loads post types on connect', async () => {
+			mockGetPostTypes.mockResolvedValue([
+				type('post'),
+				type('page'),
+				type('product'),
+			]);
+			await connectSession(session);
+
+			expect(mockGetPostTypes).toHaveBeenCalledTimes(1);
+			expect(session.getEditablePostTypes()).toEqual([
+				'post',
+				'page',
+				'product',
+			]);
+		});
+
+		it('opens a page when the post type is given', async () => {
+			await connectSession(session);
+			mockGetPost.mockResolvedValue(fakePage);
+
+			await session.openPost(10, 'page');
+
+			expect(mockGetPost).toHaveBeenCalledTimes(1);
+			expect(mockGetPost).toHaveBeenCalledWith(10, 'page');
+			expect(
+				mockSyncAddRoom.mock.calls.some(
+					(call: unknown[]) => call[0] === 'postType/page:10'
+				)
+			).toBe(true);
+			expect(session.readPost()).toContain('Type: page');
+		});
+
+		it('detects the post type when only an ID is given', async () => {
+			await connectSession(session);
+			mockGetPost.mockImplementation((_id, postType) =>
+				postType === 'page'
+					? Promise.resolve(fakePage)
+					: Promise.reject(notFound())
+			);
+
+			await session.openPost(10);
+
+			expect(mockGetPost.mock.calls).toEqual([
+				[10, 'post'],
+				[10, 'page'],
+			]);
+			expect(session.getCurrentPost()?.type).toBe('page');
+		});
+
+		it('tries custom post types learned on connect', async () => {
+			mockGetPostTypes.mockResolvedValue([
+				type('post'),
+				type('page'),
+				type('product'),
+			]);
+			await connectSession(session);
+			const product = { ...fakePage, id: 7, type: 'product' };
+			mockGetPost.mockImplementation((_id, postType) =>
+				postType === 'product'
+					? Promise.resolve(product)
+					: Promise.reject(notFound())
+			);
+
+			const text = await session.viewPost(7);
+
+			expect(mockGetPost).toHaveBeenLastCalledWith(7, 'product');
+			expect(text).toContain('Type: product');
+		});
+
+		it('does not try other types on errors other than 404', async () => {
+			await connectSession(session);
+			mockGetPost.mockRejectedValue(
+				new WordPressApiError('Forbidden', 403, '{}')
+			);
+
+			await expect(session.openPost(10)).rejects.toThrow('Forbidden');
+			expect(mockGetPost).toHaveBeenCalledTimes(1);
+		});
+
+		it('reports every type tried when no type has the ID', async () => {
+			await connectSession(session);
+			mockGetPost.mockRejectedValue(notFound());
+
+			await expect(session.openPost(999)).rejects.toThrow(
+				/No post with ID 999 .*\(post, page\)/
+			);
+			expect(session.getState()).toBe('connected');
+		});
+
+		it('sends metadata updates to the open post type', async () => {
+			await connectSession(session);
+			mockGetPost.mockResolvedValue(fakePage);
+			await session.openPost(10, 'page');
+			mockUpdatePost.mockResolvedValue({ ...fakePage, slug: 'home' });
+
+			await session.setSlug('home');
+
+			expect(mockUpdatePost).toHaveBeenCalledWith(
+				10,
+				{ slug: 'home' },
+				'page'
+			);
+		});
+
+		it('creates and opens posts of the given type', async () => {
+			await connectSession(session);
+			mockCreatePost.mockResolvedValue(fakePage);
+			mockGetPost.mockResolvedValue(fakePage);
+
+			await session.createPost({ title: 'Home' }, 'page');
+
+			expect(mockCreatePost).toHaveBeenCalledWith(
+				{ title: 'Home', content: undefined, status: 'draft' },
+				'page'
+			);
+			expect(mockGetPost).toHaveBeenCalledWith(10, 'page');
+		});
+
+		it('passes the post type through listPosts', async () => {
+			await connectSession(session);
+			mockListPosts.mockResolvedValue([fakePage]);
+
+			await session.listPosts({ postType: 'page' });
+
+			expect(mockListPosts).toHaveBeenCalledWith({ postType: 'page' });
 		});
 	});
 
@@ -852,7 +1025,7 @@ describe('SessionManager', () => {
 
 			const text = await session.viewPost(99);
 
-			expect(mockGetPost).toHaveBeenCalledWith(99);
+			expect(mockGetPost).toHaveBeenCalledWith(99, 'post');
 			expect(text).toContain('Title: "Other Post"');
 			expect(text).toContain('Status: publish');
 			expect(text).toContain('Slug: other-post');
@@ -1737,11 +1910,14 @@ describe('SessionManager', () => {
 
 			expect(post).toEqual(newPost);
 			expect(session.getState()).toBe('editing');
-			expect(mockCreatePost).toHaveBeenCalledWith({
-				title: 'New',
-				content: undefined,
-				status: 'draft',
-			});
+			expect(mockCreatePost).toHaveBeenCalledWith(
+				{
+					title: 'New',
+					content: undefined,
+					status: 'draft',
+				},
+				'post'
+			);
 		});
 	});
 
@@ -2705,9 +2881,13 @@ describe('SessionManager', () => {
 				const result = await session.setPostStatus('publish');
 
 				expect(result).toEqual(updated);
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, {
-					status: 'publish',
-				});
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{
+						status: 'publish',
+					},
+					'post'
+				);
 				const postAfterUpdate = session.getCurrentPost();
 				assertDefined(postAfterUpdate);
 				expect(postAfterUpdate.status).toBe('publish');
@@ -2745,9 +2925,13 @@ describe('SessionManager', () => {
 				const result = await session.setExcerpt('New excerpt');
 
 				expect(result).toEqual(updated);
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, {
-					excerpt: 'New excerpt',
-				});
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{
+						excerpt: 'New excerpt',
+					},
+					'post'
+				);
 				expect(mockSyncFlushQueue).toHaveBeenCalled();
 			});
 
@@ -2787,9 +2971,13 @@ describe('SessionManager', () => {
 				expect(resolved).toEqual([
 					{ name: 'Tech', id: 3, created: false },
 				]);
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, {
-					categories: [3],
-				});
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{
+						categories: [3],
+					},
+					'post'
+				);
 				expect(post.categories).toEqual([3]);
 				expect(mockSyncFlushQueue).toHaveBeenCalled();
 			});
@@ -2819,9 +3007,13 @@ describe('SessionManager', () => {
 					'categories',
 					'New Category'
 				);
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, {
-					categories: [10],
-				});
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{
+						categories: [10],
+					},
+					'post'
+				);
 			});
 
 			it('creates when search returns only substring matches (not exact)', async () => {
@@ -2893,9 +3085,13 @@ describe('SessionManager', () => {
 					{ name: 'Tech', id: 3, created: false },
 					{ name: 'Science', id: 12, created: true },
 				]);
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, {
-					categories: [3, 12],
-				});
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{
+						categories: [3, 12],
+					},
+					'post'
+				);
 			});
 
 			it('updates cached category names in readPost()', async () => {
@@ -2943,7 +3139,11 @@ describe('SessionManager', () => {
 				expect(resolved).toEqual([
 					{ name: 'JavaScript', id: 5, created: false },
 				]);
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, { tags: [5] });
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{ tags: [5] },
+					'post'
+				);
 				expect(post.tags).toEqual([5]);
 			});
 
@@ -3003,9 +3203,13 @@ describe('SessionManager', () => {
 				const result = await session.setFeaturedImage(200);
 
 				expect(result).toEqual(updated);
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, {
-					featured_media: 200,
-				});
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{
+						featured_media: 200,
+					},
+					'post'
+				);
 				expect(mockSyncFlushQueue).toHaveBeenCalled();
 			});
 
@@ -3017,9 +3221,13 @@ describe('SessionManager', () => {
 				const result = await session.setFeaturedImage(0);
 
 				expect(result).toEqual(updated);
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, {
-					featured_media: 0,
-				});
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{
+						featured_media: 0,
+					},
+					'post'
+				);
 			});
 
 			it('throws when not editing', async () => {
@@ -3039,9 +3247,13 @@ describe('SessionManager', () => {
 				const result = await session.setDate('2026-06-15T12:00:00');
 
 				expect(result).toEqual(updated);
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, {
-					date: '2026-06-15T12:00:00',
-				});
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{
+						date: '2026-06-15T12:00:00',
+					},
+					'post'
+				);
 				expect(mockSyncFlushQueue).toHaveBeenCalled();
 			});
 
@@ -3052,7 +3264,11 @@ describe('SessionManager', () => {
 
 				await session.setDate('');
 
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, { date: null });
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{ date: null },
+					'post'
+				);
 			});
 
 			it('reflects updated date in readPost()', async () => {
@@ -3084,9 +3300,13 @@ describe('SessionManager', () => {
 				const result = await session.setSlug('new-slug');
 
 				expect(result).toEqual(updated);
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, {
-					slug: 'new-slug',
-				});
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{
+						slug: 'new-slug',
+					},
+					'post'
+				);
 				expect(mockSyncFlushQueue).toHaveBeenCalled();
 			});
 
@@ -3119,9 +3339,13 @@ describe('SessionManager', () => {
 				const result = await session.setSticky(true);
 
 				expect(result).toEqual(updated);
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, {
-					sticky: true,
-				});
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{
+						sticky: true,
+					},
+					'post'
+				);
 				expect(mockSyncFlushQueue).toHaveBeenCalled();
 			});
 
@@ -3164,9 +3388,13 @@ describe('SessionManager', () => {
 				const result = await session.setCommentStatus('closed');
 
 				expect(result).toEqual(updated);
-				expect(mockUpdatePost).toHaveBeenCalledWith(42, {
-					comment_status: 'closed',
-				});
+				expect(mockUpdatePost).toHaveBeenCalledWith(
+					42,
+					{
+						comment_status: 'closed',
+					},
+					'post'
+				);
 				expect(mockSyncFlushQueue).toHaveBeenCalled();
 			});
 

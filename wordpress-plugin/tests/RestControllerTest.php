@@ -150,6 +150,23 @@ class RestControllerTest extends \WP_UnitTestCase {
 	// -------------------------------------------------------------------------
 
 	/**
+	 * A command on a page reports the page post type.
+	 */
+	public function test_create_command_reports_page_post_type() {
+		$page_id = self::factory()->post->create(
+			[
+				'post_type'   => 'page',
+				'post_author' => self::$editor_id,
+			]
+		);
+
+		$response = $this->create_command( [ 'post_id' => $page_id ] );
+
+		$this->assertSame( 201, $response->get_status() );
+		$this->assertSame( 'page', $response->get_data()['post_type'] );
+	}
+
+	/**
 	 * Creating a command returns 201 with the correct shape.
 	 */
 	public function test_create_command_success() {
@@ -160,6 +177,7 @@ class RestControllerTest extends \WP_UnitTestCase {
 		$data = $response->get_data();
 		$this->assertArrayHasKey( 'id', $data );
 		$this->assertSame( self::$target_post_id, $data['post_id'] );
+		$this->assertSame( 'post', $data['post_type'] );
 		$this->assertSame( 'review', $data['prompt'] );
 		$this->assertSame( 'pending', $data['status'] );
 		$this->assertSame( self::$editor_id, $data['user_id'] );

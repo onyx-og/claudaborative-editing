@@ -73,6 +73,11 @@ export interface PluginStatus {
 export interface Command {
 	id: number;
 	post_id: number;
+	/**
+	 * Post type of `post_id` (e.g. `page`). Additive; absent on older plugin
+	 * builds, in which case the post type is detected on open.
+	 */
+	post_type?: string | null;
 	prompt: CommandSlug;
 	arguments: Record<string, unknown>;
 	status: CommandStatus;

@@ -40,7 +40,7 @@ import { buildAwarenessState, parseCollaborators } from './awareness.js';
 import type { CommandStatus } from '../../shared/commands.js';
 import { CommandHandler } from './command-handler.js';
 import type { ChannelNotifier } from './command-handler.js';
-import { DEFAULT_SYNC_CONFIG } from '../wordpress/types.js';
+import { DEFAULT_POST_TYPE, DEFAULT_SYNC_CONFIG } from '../wordpress/types.js';
 import {
 	CRDT_DOC_VERSION,
 	CRDT_STATE_MAP_KEY,
@@ -62,9 +62,36 @@ import type {
 	WPTerm,
 	WPUser,
 	WPPost,
+	WPPostType,
 } from '../wordpress/types.js';
 
 export type SessionState = 'disconnected' | 'connected' | 'editing';
+
+/** Post types tried when the site's post types could not be fetched. */
+const FALLBACK_POST_TYPES: readonly string[] = ['post', 'page'];
+
+/**
+ * Pick the post types that can be opened for editing, posts and pages
+ * first so the common case resolves in one or two requests. Excludes
+ * types that are not viewable (template parts, patterns, navigation,
+ * fonts, …), attachments, and types without editor support.
+ */
+export function pickEditablePostTypes(types: WPPostType[]): string[] {
+	const editable = types
+		.filter(
+			(type) =>
+				type.slug !== 'attachment' &&
+				type.viewable !== false &&
+				(type.supports === undefined || 'editor' in type.supports)
+		)
+		.map((type) => type.slug);
+	const preferred = FALLBACK_POST_TYPES.filter((slug) =>
+		editable.includes(slug)
+	);
+	const rest = editable.filter((slug) => !preferred.includes(slug));
+	const picked = [...preferred, ...rest];
+	return picked.length > 0 ? picked : [...FALLBACK_POST_TYPES];
+}
 
 /**
  * Origin marker for local edits made through the session manager.
@@ -361,6 +388,11 @@ export class SessionManager {
 	private awarenessState: AwarenessLocalState | null = null;
 	private collaborators: CollaboratorInfo[] = [];
 	private notesSupported = false;
+	/**
+	 * Block-editor post types on the connected site, in the order they are
+	 * tried when a post is opened by ID alone. Filled on connect().
+	 */
+	private editablePostTypes: string[] = [...FALLBACK_POST_TYPES];
 	private updateHandler:
 		((update: Uint8Array, origin: unknown) => void) | null = null;
 	private commentDoc: Y.Doc | null = null;
@@ -538,6 +570,16 @@ export class SessionManager {
 			}
 			this.documentManager.setRegistry(this.registry);
 
+			// Learn the site's post types so pages and custom post types are
+			// routed to their own REST endpoints. Best-effort: on failure the
+			// client falls back to the core post/page routes.
+			try {
+				const types = await this.apiClient.getPostTypes();
+				this.editablePostTypes = pickEditablePostTypes(types);
+			} catch {
+				this.editablePostTypes = [...FALLBACK_POST_TYPES];
+			}
+
 			// Check if the site supports notes (block comments)
 			try {
 				this.notesSupported = await this.apiClient.checkNotesSupport();
@@ -653,6 +695,7 @@ export class SessionManager {
 			this.awarenessState = null;
 			this.collaborators = [];
 			this.notesSupported = false;
+			this.editablePostTypes = [...FALLBACK_POST_TYPES];
 			this.state = 'disconnected';
 		}
 	}
@@ -666,20 +709,68 @@ export class SessionManager {
 		status?: string;
 		search?: string;
 		perPage?: number;
+		postType?: string;
 	}): Promise<WPPost[]> {
 		this.requireState('connected', 'editing');
 		return this.apiClient.listPosts(options);
 	}
 
 	/**
+	 * Post types that can be opened for editing on the connected site.
+	 */
+	getEditablePostTypes(): string[] {
+		return [...this.editablePostTypes];
+	}
+
+	/**
+	 * Fetch a post by ID. With a post type, asks that type's endpoint only.
+	 * Without one, tries each editable post type in turn (posts first, then
+	 * pages, then custom types), because the REST API has no type-agnostic
+	 * lookup that also returns drafts. Only a 404 moves on to the next type;
+	 * any other error is thrown straight away.
+	 */
+	private async fetchPost(
+		postId: number,
+		postType?: string
+	): Promise<WPPost> {
+		if (postType) {
+			return this.apiClient.getPost(postId, postType);
+		}
+
+		let notFound: WordPressApiError | null = null;
+		for (const type of this.editablePostTypes) {
+			try {
+				return await this.apiClient.getPost(postId, type);
+			} catch (error) {
+				if (
+					error instanceof WordPressApiError &&
+					error.status === 404
+				) {
+					notFound ??= error;
+					continue;
+				}
+				throw error;
+			}
+		}
+		throw new WordPressApiError(
+			`No post with ID ${postId} was found in any editable post type (${this.editablePostTypes.join(', ')}).`,
+			404,
+			notFound?.body ?? ''
+		);
+	}
+
+	/**
 	 * Open a post for collaborative editing.
 	 * Creates Y.Doc, loads initial content, starts sync.
+	 *
+	 * @param postType Post type slug (e.g. `page`). When omitted, the type is
+	 *                 detected by trying each editable post type.
 	 */
-	async openPost(postId: number): Promise<void> {
+	async openPost(postId: number, postType?: string): Promise<void> {
 		this.requireState('connected');
 
 		// Fetch post from API
-		const post = await this.apiClient.getPost(postId);
+		const post = await this.fetchPost(postId, postType);
 		this._currentPost = post;
 		this._confirmedDocumentLanguage = readDocumentLanguageMeta(post);
 
@@ -943,19 +1034,25 @@ export class SessionManager {
 	/**
 	 * Create a new post and open it for editing.
 	 */
-	async createPost(data: {
-		title?: string;
-		content?: string;
-	}): Promise<WPPost> {
+	async createPost(
+		data: {
+			title?: string;
+			content?: string;
+		},
+		postType: string = DEFAULT_POST_TYPE
+	): Promise<WPPost> {
 		this.requireState('connected');
 
-		const post = await this.apiClient.createPost({
-			title: data.title,
-			content: data.content,
-			status: 'draft',
-		});
+		const post = await this.apiClient.createPost(
+			{
+				title: data.title,
+				content: data.content,
+				status: 'draft',
+			},
+			postType
+		);
 
-		await this.openPost(post.id);
+		await this.openPost(post.id, post.type);
 
 		return post;
 	}
@@ -1039,6 +1136,7 @@ export class SessionManager {
 
 		// Gather metadata from Y.Doc (preferred, reflects collaborative state) and currentPost (fallback)
 		const metadata: PostMetadata = {
+			postType: this._currentPost?.type,
 			status:
 				(this.documentManager.getProperty(this.doc, 'status') as
 					string | undefined) ?? this._currentPost?.status,
@@ -1094,10 +1192,10 @@ export class SessionManager {
 	 * does not touch the Y.Doc, so the currently-open post (if any) is
 	 * undisturbed. Use for research while keeping an editing session open.
 	 */
-	async viewPost(postId: number): Promise<string> {
+	async viewPost(postId: number, postType?: string): Promise<string> {
 		this.requireState('connected', 'editing');
 
-		const post = await this.apiClient.getPost(postId);
+		const post = await this.fetchPost(postId, postType);
 
 		const title = post.title.raw ?? post.title.rendered;
 		const blocks = parseBlocks(post.content.raw ?? '').map(
@@ -1110,6 +1208,7 @@ export class SessionManager {
 		]);
 
 		const metadata: PostMetadata = {
+			postType: post.type,
 			status: post.status,
 			date: post.date ?? undefined,
 			slug: post.slug,
@@ -2040,7 +2139,7 @@ export class SessionManager {
 	 * open, the current post is closed first. Serialized: concurrent calls
 	 * wait for the previous one to complete.
 	 */
-	async preOpenPost(postId: number): Promise<void> {
+	async preOpenPost(postId: number, postType?: string): Promise<void> {
 		// Chain onto any in-flight operation so concurrent calls
 		// are properly serialized (no gap between clearing the
 		// sentinel and the next caller checking it).
@@ -2057,13 +2156,16 @@ export class SessionManager {
 					// Previous caller already observed (or swallowed) this.
 				}
 			}
-			await this._doPreOpenPost(postId);
+			await this._doPreOpenPost(postId, postType);
 		})();
 		this._preOpenInProgress = current;
 		await current;
 	}
 
-	private async _doPreOpenPost(postId: number): Promise<void> {
+	private async _doPreOpenPost(
+		postId: number,
+		postType?: string
+	): Promise<void> {
 		if (this.state === 'disconnected') return;
 
 		// Already editing this post — nothing to do.
@@ -2077,7 +2179,7 @@ export class SessionManager {
 		}
 
 		// Now in 'connected' state — open the requested post.
-		await this.openPost(postId);
+		await this.openPost(postId, postType);
 
 		// Pre-cache notes if supported (useful for review/respond-to-notes commands).
 		if (this.notesSupported) {
@@ -2135,8 +2237,8 @@ export class SessionManager {
 		if (this._user) {
 			handler.setUserId(this._user.id);
 		}
-		handler.setPreOpenHandler(async (postId) => {
-			await this.preOpenPost(postId);
+		handler.setPreOpenHandler(async (postId, postType) => {
+			await this.preOpenPost(postId, postType);
 		});
 		handler.setContentProvider(async () => {
 			if (this.state !== 'editing' || !this._currentPost) return null;
@@ -2588,7 +2690,8 @@ export class SessionManager {
 		// Persist via REST API first — fail fast before touching collaborative state
 		const updated = await this.apiClient.updatePost(
 			this.currentPost.id,
-			fields
+			fields,
+			this.currentPost.type
 		);
 		this._currentPost = updated;
 
@@ -2714,9 +2817,10 @@ export class SessionManager {
 		}
 		const apiClient = this._apiClient;
 		const postId = this._currentPost.id;
+		const postType = this._currentPost.type;
 		this.postGoneCheck = (async () => {
 			try {
-				const post = await apiClient.getPost(postId);
+				const post = await apiClient.getPost(postId, postType);
 				if (post.status === 'trash') {
 					this.postGone = true;
 					this.postGoneReason =

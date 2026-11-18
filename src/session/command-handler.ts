@@ -44,7 +44,10 @@ export type ChannelNotifier = (params: {
 }) => Promise<void>;
 
 /** Callback to pre-open a post before notification dispatch. */
-export type PreOpenHandler = (postId: number) => Promise<void>;
+export type PreOpenHandler = (
+	postId: number,
+	postType?: string
+) => Promise<void>;
 
 /** Snapshot of post content and metadata for embedding in notifications. */
 export interface ContentSnapshot {
@@ -415,6 +418,9 @@ export class CommandHandler {
 			post_id: String(command.post_id),
 			event_type: 'response',
 		};
+		if (command.post_type) {
+			meta.post_type = command.post_type;
+		}
 
 		const userLocale = command.arguments.userLocale;
 		if (typeof userLocale === 'string' && userLocale) {
@@ -458,7 +464,10 @@ export class CommandHandler {
 		// notification so it's ready when a real command arrives.
 		if (command.prompt === 'open-post' && this.preOpenHandler) {
 			try {
-				await this.preOpenHandler(command.post_id);
+				await this.preOpenHandler(
+					command.post_id,
+					command.post_type ?? undefined
+				);
 			} catch {
 				// Pre-open failed — continue with notification anyway.
 			}
@@ -506,6 +515,9 @@ export class CommandHandler {
 			prompt: command.prompt,
 			post_id: String(command.post_id),
 		};
+		if (command.post_type) {
+			meta.post_type = command.post_type;
+		}
 
 		const userLocale = command.arguments.userLocale;
 		if (typeof userLocale === 'string' && userLocale) {

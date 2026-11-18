@@ -9,6 +9,7 @@ import type {
 	WPMediaItem,
 	WPNote,
 	WPPost,
+	WPPostType,
 	WPTerm,
 	WPUser,
 } from '../../src/wordpress/types.js';
@@ -736,6 +737,95 @@ describe('WordPressApiClient', () => {
 				expect.anything()
 			);
 			expect(post).toEqual(fakePost);
+		});
+
+		it('uses the pages route for the page post type', async () => {
+			fetchMock.mockResolvedValue(mockResponse(fakePost));
+			const client = createClient();
+			await client.getPost(10, 'page');
+
+			expect(fetchMock).toHaveBeenCalledWith(
+				'https://example.com/wp-json/wp/v2/pages/10?context=edit',
+				expect.anything()
+			);
+		});
+	});
+
+	describe('post type routing', () => {
+		const types: Record<string, WPPostType> = {
+			post: {
+				slug: 'post',
+				name: 'Posts',
+				rest_base: 'posts',
+				rest_namespace: 'wp/v2',
+			},
+			page: {
+				slug: 'page',
+				name: 'Pages',
+				rest_base: 'pages',
+				rest_namespace: 'wp/v2',
+			},
+			book: {
+				slug: 'book',
+				name: 'Books',
+				rest_base: 'library',
+				rest_namespace: 'shelf/v1',
+			},
+			legacy: { slug: 'legacy', name: 'Legacy', rest_base: 'legacies' },
+		};
+
+		it('fetches post types with context=edit', async () => {
+			fetchMock.mockResolvedValue(mockResponse(types));
+			const client = createClient();
+			const result = await client.getPostTypes();
+
+			expect(fetchMock).toHaveBeenCalledWith(
+				'https://example.com/wp-json/wp/v2/types?context=edit',
+				expect.anything()
+			);
+			expect(result.map((t) => t.slug)).toEqual([
+				'post',
+				'page',
+				'book',
+				'legacy',
+			]);
+		});
+
+		it('routes requests through each type’s rest_namespace and rest_base', async () => {
+			fetchMock.mockResolvedValue(mockResponse(types));
+			const client = createClient();
+			await client.getPostTypes();
+
+			expect(client.postTypeRoute('book')).toBe('/shelf/v1/library');
+			expect(client.postTypeRoute('legacy')).toBe('/wp/v2/legacies');
+			expect(client.postTypeRoute()).toBe('/wp/v2/posts');
+
+			fetchMock.mockResolvedValue(mockResponse([fakePost]));
+			await client.listPosts({ postType: 'book', status: 'draft' });
+			expect(fetchMock).toHaveBeenLastCalledWith(
+				'https://example.com/wp-json/shelf/v1/library?context=edit&status=draft',
+				expect.anything()
+			);
+
+			fetchMock.mockResolvedValue(mockResponse(fakePost));
+			await client.updatePost(7, { title: 'T' }, 'book');
+			expect(fetchMock).toHaveBeenLastCalledWith(
+				'https://example.com/wp-json/shelf/v1/library/7?context=edit',
+				expect.objectContaining({ method: 'POST' })
+			);
+
+			await client.createPost({ title: 'T' }, 'book');
+			expect(fetchMock).toHaveBeenLastCalledWith(
+				'https://example.com/wp-json/shelf/v1/library',
+				expect.objectContaining({ method: 'POST' })
+			);
+		});
+
+		it('falls back to core routes before post types are loaded', () => {
+			const client = createClient();
+			expect(client.postTypeRoute('post')).toBe('/wp/v2/posts');
+			expect(client.postTypeRoute('page')).toBe('/wp/v2/pages');
+			expect(client.postTypeRoute('product')).toBe('/wp/v2/product');
 		});
 	});
 

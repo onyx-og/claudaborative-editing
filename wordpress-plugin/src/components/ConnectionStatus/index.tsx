@@ -110,13 +110,13 @@ export default function ConnectionStatus() {
 
 			const post = select(coreDataStore).getEntityRecord(
 				'postType',
-				'post',
+				activeCommand.post_type ?? 'post',
 				activeCommand.post_id
 			) as { title?: { rendered?: string } } | null | undefined;
 
 			return post?.title?.rendered ?? null;
 		},
-		[isEditingOtherPost, activeCommand?.post_id]
+		[isEditingOtherPost, activeCommand?.post_id, activeCommand?.post_type]
 	);
 
 	// Track whether MCP was ever connected during this editor session.

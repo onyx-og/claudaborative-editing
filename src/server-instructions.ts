@@ -41,7 +41,7 @@ The notification content contains the full post content and task instructions. T
 
 **New command (no event_type or event_type is absent, no content_embedded):**
 1. If meta.status is "already_claimed", skip this step. Otherwise, call wp_update_command_status with the command_id from the notification metadata and status "running".
-2. If no post is open, call wp_open_post with the post_id from the notification metadata. If a different post is open, call wp_close_post first.
+2. If no post is open, call wp_open_post with the post_id (and post_type, when present) from the notification metadata. If a different post is open, call wp_close_post first.
 3. Execute the requested action based on the prompt field: ${promptDescriptions}.
 4. Call wp_update_command_status with status "completed" and a brief summary, or "failed" with an error message.
 

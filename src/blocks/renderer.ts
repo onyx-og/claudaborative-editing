@@ -6,6 +6,8 @@ import type { Block } from '../yjs/types.js';
 
 /** Post metadata to display in the rendered output. */
 export interface PostMetadata {
+	/** Post type slug. Rendered only when it is not `post`. */
+	postType?: string;
 	status?: string;
 	date?: string | null;
 	slug?: string;
@@ -39,6 +41,9 @@ export function renderPost(
 	parts.push(`Title: "${title}"`);
 
 	if (metadata) {
+		if (metadata.postType && metadata.postType !== 'post') {
+			parts.push(`Type: ${metadata.postType}`);
+		}
 		if (metadata.status) {
 			parts.push(`Status: ${metadata.status}`);
 		}

@@ -284,6 +284,47 @@ describe('ConnectionStatus', () => {
 		expect(screen.getByText('Editing: My Other Post')).toBeTruthy();
 	});
 
+	it('looks up the other post title using the command post type', async () => {
+		mockedUseMcpStatus.mockReturnValue({
+			mcpConnected: true,
+			mcpLastSeenAt: '2026-03-30T12:00:00Z',
+			isLoading: false,
+			error: null,
+		});
+
+		mockedUseCommands.mockReturnValue({
+			activeCommand: {
+				id: 1,
+				post_id: 999,
+				post_type: 'page',
+				status: 'running',
+			},
+			isSubmitting: false,
+			error: null,
+			history: [],
+			submit: jest.fn(),
+			cancel: jest.fn(),
+		});
+
+		const getEntityRecord = jest.fn(() => ({
+			title: { rendered: 'My Other Page' },
+		}));
+		mockUseSelect(
+			new Map<unknown, Record<string, (...args: any[]) => any>>([
+				[aiActionsStore, { getCurrentPostId: () => 100 }],
+				[coreDataStore, { getEntityRecord }],
+			])
+		);
+
+		await act(async () => render(<ConnectionStatus />));
+
+		const toggle = footerEl.querySelector('.wpce-footer-status-toggle')!;
+		await act(async () => fireEvent.click(toggle));
+
+		expect(getEntityRecord).toHaveBeenCalledWith('postType', 'page', 999);
+		expect(screen.getByText('Editing: My Other Page')).toBeTruthy();
+	});
+
 	it('shows success snackbar when command completes', async () => {
 		mockedUseCommands.mockReturnValue({
 			activeCommand: {

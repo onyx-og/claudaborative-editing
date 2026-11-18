@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition } from './definitions.js';
+import { postTypeSchema } from './posts.js';
 
 export const readTools: ToolDefinition[] = [
 	{
@@ -29,10 +30,15 @@ export const readTools: ToolDefinition[] = [
 			'Read any WordPress post by ID without opening it for editing. Returns the saved (committed) content as a block listing. Use this to research other posts while keeping the current post open.',
 		inputSchema: {
 			postId: z.number().describe('The post ID to read'),
+			postType: postTypeSchema(
+				'Optional: when omitted, the type is detected from the ID.'
+			),
 		},
 		availableIn: ['connected', 'editing'],
 		tags: ['reading', 'posts'],
-		execute: (session, { postId }: { postId: number }) =>
-			session.viewPost(postId),
+		execute: (
+			session,
+			{ postId, postType }: { postId: number; postType?: string }
+		) => session.viewPost(postId, postType),
 	},
 ];

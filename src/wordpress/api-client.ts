@@ -1,13 +1,15 @@
-import type {
-	WordPressConfig,
-	WPBlockType,
-	WPMediaItem,
-	WPNote,
-	WPPost,
-	WPTerm,
-	WPUser,
-	SyncPayload,
-	SyncResponse,
+import {
+	DEFAULT_POST_TYPE,
+	type WordPressConfig,
+	type WPBlockType,
+	type WPMediaItem,
+	type WPNote,
+	type WPPost,
+	type WPPostType,
+	type WPTerm,
+	type WPUser,
+	type SyncPayload,
+	type SyncResponse,
 } from './types.js';
 import {
 	collaborationGuidance,
@@ -50,6 +52,8 @@ export class WordPressApiClient {
 	private baseUrl: string;
 	private restRouteMode: boolean;
 	private authHeader: string;
+	/** Post type slug → collection route, filled by getPostTypes(). */
+	private postTypeRoutes = new Map<string, string>();
 
 	constructor(config: WordPressConfig) {
 		// Normalise URL: strip trailing slash(es)
@@ -198,13 +202,57 @@ export class WordPressApiClient {
 	}
 
 	/**
+	 * Fetch the post types exposed over REST.
+	 * GET /wp/v2/types?context=edit
+	 *
+	 * Also records each type's collection route so later post requests
+	 * for that type go to the right endpoint (see {@link postTypeRoute}).
+	 */
+	async getPostTypes(): Promise<WPPostType[]> {
+		const types = await this.apiFetch<Record<string, WPPostType>>(
+			'/wp/v2/types?context=edit'
+		);
+		const list = Object.values(types);
+		this.postTypeRoutes.clear();
+		for (const type of list) {
+			const namespace = (type.rest_namespace ?? 'wp/v2').replace(
+				/^\/+|\/+$/g,
+				''
+			);
+			this.postTypeRoutes.set(
+				type.slug,
+				`/${namespace}/${type.rest_base}`
+			);
+		}
+		return list;
+	}
+
+	/**
+	 * Collection route for a post type, e.g. `post` → `/wp/v2/posts`,
+	 * `page` → `/wp/v2/pages`, `product` → `/wp/v2/product`.
+	 *
+	 * Uses the routes learned by {@link getPostTypes}. Before that has run
+	 * (or for a type it did not return) it falls back to the core routes
+	 * for posts and pages, and to WordPress's default `rest_base` (the
+	 * slug itself) for anything else.
+	 */
+	postTypeRoute(postType: string = DEFAULT_POST_TYPE): string {
+		const known = this.postTypeRoutes.get(postType);
+		if (known) return known;
+		if (postType === 'post') return '/wp/v2/posts';
+		if (postType === 'page') return '/wp/v2/pages';
+		return `/wp/v2/${encodeURIComponent(postType)}`;
+	}
+
+	/**
 	 * List posts with optional filters.
-	 * GET /wp/v2/posts?status=...&search=...&per_page=...&context=edit
+	 * GET /wp/v2/{rest_base}?status=...&search=...&per_page=...&context=edit
 	 */
 	async listPosts(options?: {
 		status?: string;
 		search?: string;
 		perPage?: number;
+		postType?: string;
 	}): Promise<WPPost[]> {
 		const params = new URLSearchParams({ context: 'edit' });
 
@@ -218,27 +266,37 @@ export class WordPressApiClient {
 			params.set('per_page', String(options.perPage));
 		}
 
-		return this.apiFetch<WPPost[]>(`/wp/v2/posts?${params.toString()}`);
+		return this.apiFetch<WPPost[]>(
+			`${this.postTypeRoute(options?.postType)}?${params.toString()}`
+		);
 	}
 
 	/**
 	 * Get a single post by ID.
-	 * GET /wp/v2/posts/{id}?context=edit
+	 * GET /wp/v2/{rest_base}/{id}?context=edit
 	 */
-	async getPost(id: number): Promise<WPPost> {
-		return this.apiFetch<WPPost>(`/wp/v2/posts/${id}?context=edit`);
+	async getPost(
+		id: number,
+		postType: string = DEFAULT_POST_TYPE
+	): Promise<WPPost> {
+		return this.apiFetch<WPPost>(
+			`${this.postTypeRoute(postType)}/${id}?context=edit`
+		);
 	}
 
 	/**
 	 * Create a new post.
-	 * POST /wp/v2/posts
+	 * POST /wp/v2/{rest_base}
 	 */
-	async createPost(data: {
-		title?: string;
-		content?: string;
-		status?: string;
-	}): Promise<WPPost> {
-		return this.apiFetch<WPPost>('/wp/v2/posts', {
+	async createPost(
+		data: {
+			title?: string;
+			content?: string;
+			status?: string;
+		},
+		postType: string = DEFAULT_POST_TYPE
+	): Promise<WPPost> {
+		return this.apiFetch<WPPost>(this.postTypeRoute(postType), {
 			method: 'POST',
 			body: JSON.stringify(data),
 		});
@@ -283,16 +341,20 @@ export class WordPressApiClient {
 
 	/**
 	 * Update an existing post's fields.
-	 * POST /wp/v2/posts/{id}?context=edit
+	 * POST /wp/v2/{rest_base}/{id}?context=edit
 	 */
 	async updatePost(
 		id: number,
-		data: Record<string, unknown>
+		data: Record<string, unknown>,
+		postType: string = DEFAULT_POST_TYPE
 	): Promise<WPPost> {
-		return this.apiFetch<WPPost>(`/wp/v2/posts/${id}?context=edit`, {
-			method: 'POST',
-			body: JSON.stringify(data),
-		});
+		return this.apiFetch<WPPost>(
+			`${this.postTypeRoute(postType)}/${id}?context=edit`,
+			{
+				method: 'POST',
+				body: JSON.stringify(data),
+			}
+		);
 	}
 
 	/**

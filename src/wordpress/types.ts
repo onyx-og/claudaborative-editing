@@ -79,6 +79,25 @@ export interface WPPost {
 	meta?: Record<string, unknown>;
 }
 
+/** Post type used when a caller does not name one. */
+export const DEFAULT_POST_TYPE = 'post';
+
+/**
+ * A post type as returned by GET /wp/v2/types?context=edit.
+ * Only the fields used to route REST requests and pick editable types.
+ */
+export interface WPPostType {
+	slug: string;
+	name: string;
+	rest_base: string;
+	/** Absent before WordPress 5.9; treat as `wp/v2`. */
+	rest_namespace?: string;
+	/** Absent before WordPress 5.9. */
+	viewable?: boolean;
+	/** Only present in the edit context. */
+	supports?: Record<string, unknown>;
+}
+
 /** WordPress taxonomy term (category or tag) as returned by the REST API. */
 export interface WPTerm {
 	id: number;

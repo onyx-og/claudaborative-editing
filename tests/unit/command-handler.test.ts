@@ -2286,9 +2286,40 @@ describe('CommandHandler', () => {
 			);
 
 			expect(preOpenHandler).toHaveBeenCalledOnce();
-			expect(preOpenHandler).toHaveBeenCalledWith(200);
+			expect(preOpenHandler).toHaveBeenCalledWith(200, undefined);
 			// Notification should still be sent
 			expect(notifier).toHaveBeenCalledOnce();
+		});
+
+		it('passes post_type to preOpenHandler and the notification meta', async () => {
+			const { dispatchCommand } = setupMockCommandClient({
+				resolve: makePluginStatus(),
+			});
+
+			const notifier = vi
+				.fn<ChannelNotifier>()
+				.mockResolvedValue(undefined);
+			handler.setNotifier(notifier);
+
+			const preOpenHandler = vi
+				.fn<PreOpenHandler>()
+				.mockResolvedValue(undefined);
+			handler.setPreOpenHandler(preOpenHandler);
+
+			await handler.start(createMockApiClient(), createCommandMap());
+
+			await dispatchCommand(
+				makeCommand({
+					id: 31,
+					post_id: 10,
+					post_type: 'page',
+					prompt: 'open-post' as Command['prompt'],
+				})
+			);
+
+			expect(preOpenHandler).toHaveBeenCalledWith(10, 'page');
+			const [params] = notifier.mock.calls[0];
+			expect(params.meta.post_type).toBe('page');
 		});
 
 		it('still sends notification when preOpenHandler throws', async () => {

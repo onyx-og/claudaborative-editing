@@ -113,9 +113,17 @@ describe('read tools', () => {
 			assertDefined(tool);
 			const result = await tool.handler({ postId: 99 });
 
-			expect(session.viewPost).toHaveBeenCalledWith(99);
+			expect(session.viewPost).toHaveBeenCalledWith(99, undefined);
 			expect(result.content[0].text).toContain('Title: "Other Post"');
 			expect(result.content[0].text).toContain('Other content');
+		});
+
+		it('passes postType through to the session', async () => {
+			const tool = server.registeredTools.get('wp_view_post');
+			assertDefined(tool);
+			await tool.handler({ postId: 10, postType: 'page' });
+
+			expect(session.viewPost).toHaveBeenCalledWith(10, 'page');
 		});
 
 		it('returns error when the post is not found', async () => {

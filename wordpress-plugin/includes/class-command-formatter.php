@@ -23,6 +23,7 @@ class Command_Formatter {
 	 * @return array{
 	 *     id: int,
 	 *     post_id: int,
+	 *     post_type: string|null,
 	 *     prompt: string,
 	 *     arguments: object,
 	 *     status: string,
@@ -40,6 +41,7 @@ class Command_Formatter {
 		$message     = get_post_meta( $post->ID, 'wpce_message', true );
 		$arguments   = get_post_meta( $post->ID, 'wpce_arguments', true );
 		$result_data = get_post_meta( $post->ID, 'wpce_result_data', true );
+		$post_type   = $post->post_parent ? get_post_type( $post->post_parent ) : false;
 
 		$decoded_args = json_decode( $arguments ? $arguments : '{}' );
 
@@ -54,6 +56,7 @@ class Command_Formatter {
 		return [
 			'id'          => $post->ID,
 			'post_id'     => (int) $post->post_parent,
+			'post_type'   => $post_type ? $post_type : null,
 			'prompt'      => get_post_meta( $post->ID, 'wpce_prompt', true ),
 			'arguments'   => $decoded_args,
 			'status'      => get_post_meta( $post->ID, 'wpce_command_status', true ),
